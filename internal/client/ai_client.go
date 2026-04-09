@@ -84,54 +84,68 @@ func (c *aiClientImpl) executeRequest(url, apiKey string, reqBody map[string]int
 }
 
 func (c *aiClientImpl) makeRequestWithFailover(systemPrompt, userPrompt string, useJSON bool) (string, error) {
+	if c.groqApiKey == "" && c.geminiApiKey == "" {
+		return "", errors.New("neither Groq nor Gemini API keys are provided. Please add them to your .env file to enable AI features")
+	}
+
+	var primaryErr error
 	// 1. Try Groq as Primary
-	groqUrl := "https://api.groq.com/openai/v1/chat/completions"
-	groqBody := map[string]interface{}{
-		"model": "llama3-70b-8192", 
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userPrompt},
-		},
-	}
-
-	if useJSON {
-		groqBody["response_format"] = map[string]interface{}{
-			"type": "json_object",
+	if c.groqApiKey != "" {
+		groqUrl := "https://api.groq.com/openai/v1/chat/completions"
+		groqBody := map[string]interface{}{
+			"model": "llama3-70b-8192",
+			"messages": []map[string]string{
+				{"role": "system", "content": systemPrompt},
+				{"role": "user", "content": userPrompt},
+			},
 		}
-	}
 
-	log.Println("Attempting AI request with Groq...")
-	content, err := c.executeRequest(groqUrl, c.groqApiKey, groqBody)
-	if err == nil {
-		log.Println("Groq request successful.")
-		return content, nil
-	}
+		if useJSON {
+			groqBody["response_format"] = map[string]interface{}{
+				"type": "json_object",
+			}
+		}
 
-	log.Printf("Groq API request failed: %v. Initiating fallback to Gemini...\n", err)
+		log.Println("Attempting AI request with Groq...")
+		content, err := c.executeRequest(groqUrl, c.groqApiKey, groqBody)
+		if err == nil {
+			log.Println("Groq request successful.")
+			return content, nil
+		}
+		primaryErr = err
+		log.Printf("Groq API request failed: %v. Initiating fallback to Gemini...\n", err)
+	} else {
+		log.Println("Groq API Key missing, skipping Groq.")
+		primaryErr = errors.New("Groq API key missing")
+	}
 
 	// 2. Try Gemini as Fallback (using OpenAI compatibility layer)
-	geminiUrl := "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-	geminiBody := map[string]interface{}{
-		"model": "gemini-1.5-flash",
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userPrompt},
-		},
-	}
-
-	if useJSON {
-		geminiBody["response_format"] = map[string]interface{}{
-			"type": "json_object",
+	if c.geminiApiKey != "" {
+		geminiUrl := "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+		geminiBody := map[string]interface{}{
+			"model": "gemini-1.5-flash",
+			"messages": []map[string]string{
+				{"role": "system", "content": systemPrompt},
+				{"role": "user", "content": userPrompt},
+			},
 		}
+
+		if useJSON {
+			geminiBody["response_format"] = map[string]interface{}{
+				"type": "json_object",
+			}
+		}
+
+		log.Println("Attempting AI request with Gemini...")
+		contentFallback, errFallback := c.executeRequest(geminiUrl, c.geminiApiKey, geminiBody)
+		if errFallback == nil {
+			log.Println("Gemini fallback request successful.")
+			return contentFallback, nil
+		}
+		return "", fmt.Errorf("all enabled AI APIs failed. Primary Error (Groq): %v, Fallback Error (Gemini): %v", primaryErr, errFallback)
 	}
 
-	contentFallback, errFallback := c.executeRequest(geminiUrl, c.geminiApiKey, geminiBody)
-	if errFallback == nil {
-		log.Println("Gemini fallback request successful.")
-		return contentFallback, nil
-	}
-
-	return "", fmt.Errorf("all AI APIs failed. Primary Error: %v, Fallback Error: %v", err, errFallback)
+	return "", fmt.Errorf("all AI attempts failed or skipped. Primary Error (Groq): %v, Gemini: missing API key", primaryErr)
 }
 
 func (c *aiClientImpl) ExtractIntent(query string) (*model.AIIntent, error) {

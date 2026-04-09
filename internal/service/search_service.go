@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"log"
+
 	"map-backend/internal/client"
 	"map-backend/internal/model"
 	"map-backend/internal/repository"
@@ -45,7 +47,11 @@ func (s *searchServiceImpl) Search(ctx context.Context, query string) (*model.Se
 	// 2. Extract Intent via AI
 	intent, err := s.aiClient.ExtractIntent(query)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract intent: %w", err)
+		log.Printf("AI Intent Extraction skipped or failed: %v. Falling back to raw query.", err)
+		// Fallback intent: use the raw query as category
+		intent = &model.AIIntent{
+			Category: query,
+		}
 	}
 
 	// Save history asynchronously (or synchronously for simplicity here)
@@ -92,8 +98,9 @@ func (s *searchServiceImpl) Search(ctx context.Context, query string) (*model.Se
 	// 5. Generate Summary via AI
 	summary, err := s.aiClient.GenerateSummary(topPlaces)
 	if err != nil {
+		log.Printf("AI Summary generation skipped or failed: %v. Using default summary.", err)
 		// Non-fatal error, we can still return places
-		summary = "Here are some great places based on your search!"
+		summary = "Here are some great places based on your search! (AI summary unavailable)"
 	}
 
 	response := &model.SearchResponse{
