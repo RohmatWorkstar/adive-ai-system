@@ -1,52 +1,130 @@
-# Adivel AI Backend
+# Travida — AI Map Recommendation Backend
 
-This is the backend API service for the Adivel AI project, built using Go.
+A production-ready Go REST API that accepts natural language queries, uses multi-AI providers (Grok + Gemini) to extract structured intent, fetches real place data from **Foursquare API**, and returns clean, frontend-ready responses.
 
-## Technologies Used
+## Architecture
 
-*   **Language:** Go (1.25+)
-*   **HTTP Router:** go-chi/chi (v5)
-*   **Database:** PostgreSQL
-*   **Database Driver:** pgx (v5)
-*   **Environment Management:** godotenv
+```
+cmd/
+  api/
+    main.go                  # Entry point, dependency wiring
 
-## Architecture Layout
+internal/
+  client/
+    ai_client.go             # AI orchestrator (Grok → Gemini → keyword fallback)
+    grok_client.go           # Grok AI provider (via Groq API)
+    gemini_client.go         # Gemini AI provider (OpenAI-compatible)
+    foursquare_client.go     # Foursquare Places API v3 client
+  config/
+    config.go                # Environment config loader
+  handler/
+    search.go                # POST /api/search
+    favorites.go             # GET/POST /api/favorites
+    health.go                # GET /api/health
+  middleware/
+    rate_limiter.go          # Token-bucket rate limiter (30 req/min/IP)
+    logging.go               # Structured request logging
+  model/
+    domain.go                # Data types (Place, AIIntent, SearchResponse, etc.)
+  repository/
+    db.go                    # PostgreSQL connection pooling
+    search_repo.go           # Search cache & history (24h TTL)
+    favorites_repo.go        # User favorites CRUD
+  service/
+    search_service.go        # Core search logic + in-memory cache
+    favorites_service.go     # Favorites business logic
+  utils/
+    utils.go                 # Query normalization, ranking algorithm
 
-The application follows a standard Go project layout:
-*   `cmd/api/`: Application entry point.
-*   `internal/`: Private application code.
-    *   `config/`: Configuration setup and environment loading.
-    *   `handler/`: HTTP handlers and controllers.
-    *   `model/`: Data structures and domain logic.
-    *   `repository/`: Database interactions and queries.
-    *   `service/`: Core business logic.
-    *   `client/`: External API clients.
-    *   `utils/`: Helper functions.
-*   `sql/`: Database schema, migrations, or setup scripts.
+sql/
+  schema.sql                 # Database schema (Supabase PostgreSQL)
+```
 
-## Prerequisites
+## Tech Stack
 
-*   Go 1.25.0 or higher
-*   PostgreSQL running locally or remotely
+- **Language**: Go 1.25
+- **Router**: [chi](https://github.com/go-chi/chi) v5
+- **Database**: PostgreSQL (Supabase)
+- **AI Providers**: Grok (Groq API) + Gemini (Google AI)
+- **Places API**: Foursquare v3
 
-## Getting Started
+## Quick Start
 
-1.  **Install Go dependencies:**
-    ```bash
-    go mod tidy
-    ```
+### 1. Configure Environment
 
-2.  **Database Setup:**
-    Ensure your PostgreSQL server is up and running. Create a database for the application.
+```bash
+cp .env.example .env
+# Edit .env with your API keys
+```
 
-3.  **Environment Variables:**
-    Copy the `.env.example` file to `.env` and fill in your connection details (such as `DB_URL` or equivalent configurations).
-    ```bash
-    cp .env.example .env
-    ```
+### 2. Install & Run
 
-4.  **Run the application locally:**
-    ```bash
-    go run cmd/api/main.go
-    ```
-    *(Note: Modify the `main.go` path if your entry point has a different name under `cmd/api/`)*
+```bash
+go mod tidy
+go run cmd/api/main.go
+```
+
+### 3. Test
+
+```bash
+# Health check
+curl http://localhost:8080/api/health
+
+# Search
+curl -X POST http://localhost:8080/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "tempat makan murah di bekasi"}'
+```
+
+## API Endpoints
+
+| Method | Path              | Description                  |
+|--------|-------------------|------------------------------|
+| GET    | `/api/health`     | Health check                 |
+| POST   | `/api/search`     | AI-powered place search      |
+| GET    | `/api/favorites`  | Get user favorites           |
+| POST   | `/api/favorites`  | Add a favorite place         |
+
+### POST /api/search
+
+**Request:**
+```json
+{
+  "query": "tempat makan murah di bekasi"
+}
+```
+
+**Response:**
+```json
+{
+  "places": [
+    {
+      "name": "Warung Sederhana",
+      "rating": 8.5,
+      "address": "Jl. Ahmad Yani, Bekasi",
+      "lat": -6.2383,
+      "lng": 106.9756,
+      "category": "Restaurant"
+    }
+  ],
+  "summary": "These are popular and affordable dining spots near Bekasi."
+}
+```
+
+## Multi-AI Strategy
+
+| Purpose            | Primary | Fallback | Final Fallback       |
+|--------------------|---------|----------|----------------------|
+| Intent Extraction  | Grok    | Gemini   | Keyword extraction   |
+| Summary Generation | Gemini  | Grok     | Static message       |
+
+## Environment Variables
+
+| Variable             | Required | Description                    |
+|----------------------|----------|--------------------------------|
+| `GROK_API_KEY`       | Optional | Groq API key (primary AI)      |
+| `GEMINI_API_KEY`     | Optional | Google Gemini API key           |
+| `FOURSQUARE_API_KEY` | Yes      | Foursquare Places API key       |
+| `SUPABASE_DB_URL`    | Optional | PostgreSQL connection string    |
+| `PORT`               | No       | Server port (default: 8080)     |
+| `ENV`                | No       | Environment (default: development) |

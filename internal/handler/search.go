@@ -28,7 +28,13 @@ func (h *SearchHandler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.service.Search(r.Context(), req.Query)
+	// Extract user ID from header (prepared for auth integration)
+	userID := r.Header.Get("X-User-ID")
+	if userID == "" {
+		userID = "anonymous"
+	}
+
+	resp, err := h.service.Search(r.Context(), req.Query, userID)
 	if err != nil {
 		h.errorResponse(w, http.StatusInternalServerError, err.Error())
 		return

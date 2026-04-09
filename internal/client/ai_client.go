@@ -1,183 +1,173 @@
 package client
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"time"
+	"strings"
 
 	"map-backend/internal/model"
 )
 
+// AIClient is the orchestrator that delegates to Grok (primary) and Gemini (fallback)
+// for intent extraction, and Gemini (primary) and Grok (fallback) for summary generation
 type AIClient interface {
 	ExtractIntent(query string) (*model.AIIntent, error)
 	GenerateSummary(places []model.Place) (string, error)
 }
 
 type aiClientImpl struct {
-	groqApiKey   string
-	geminiApiKey string
-	httpClient   *http.Client
+	grok   *GrokClient
+	gemini *GeminiClient
 }
 
-func NewAIClient(groqApiKey, geminiApiKey string) AIClient {
+// NewAIClient creates a new AI orchestrator with Grok and Gemini providers
+func NewAIClient(grok *GrokClient, gemini *GeminiClient) AIClient {
 	return &aiClientImpl{
-		groqApiKey:   groqApiKey,
-		geminiApiKey: geminiApiKey,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second, // Timeout to prevent hanging
-		},
+		grok:   grok,
+		gemini: gemini,
 	}
 }
 
-// executeRequest sends an HTTP request and checks the status
-func (c *aiClientImpl) executeRequest(url, apiKey string, reqBody map[string]interface{}) (string, error) {
-	bodyBytes, _ := json.Marshal(reqBody)
-
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("api error: status %d, body %s", resp.StatusCode, string(respBody))
-	}
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	choices, ok := result["choices"].([]interface{})
-	if !ok || len(choices) == 0 {
-		return "", errors.New("no choices returned by API")
-	}
-
-	messageMap, ok := choices[0].(map[string]interface{})
-	if !ok {
-		return "", errors.New("invalid choice structure")
-	}
-	message, ok := messageMap["message"].(map[string]interface{})
-	if !ok {
-		return "", errors.New("invalid message structure")
-	}
-	content, ok := message["content"].(string)
-	if !ok {
-		return "", errors.New("invalid content structure")
-	}
-
-	return content, nil
-}
-
-func (c *aiClientImpl) makeRequestWithFailover(systemPrompt, userPrompt string, useJSON bool) (string, error) {
-	if c.groqApiKey == "" && c.geminiApiKey == "" {
-		return "", errors.New("neither Groq nor Gemini API keys are provided. Please add them to your .env file to enable AI features")
-	}
-
-	var primaryErr error
-	// 1. Try Groq as Primary
-	if c.groqApiKey != "" {
-		groqUrl := "https://api.groq.com/openai/v1/chat/completions"
-		groqBody := map[string]interface{}{
-			"model": "llama3-70b-8192",
-			"messages": []map[string]string{
-				{"role": "system", "content": systemPrompt},
-				{"role": "user", "content": userPrompt},
-			},
-		}
-
-		if useJSON {
-			groqBody["response_format"] = map[string]interface{}{
-				"type": "json_object",
-			}
-		}
-
-		log.Println("Attempting AI request with Groq...")
-		content, err := c.executeRequest(groqUrl, c.groqApiKey, groqBody)
-		if err == nil {
-			log.Println("Groq request successful.")
-			return content, nil
-		}
-		primaryErr = err
-		log.Printf("Groq API request failed: %v. Initiating fallback to Gemini...\n", err)
-	} else {
-		log.Println("Groq API Key missing, skipping Groq.")
-		primaryErr = errors.New("Groq API key missing")
-	}
-
-	// 2. Try Gemini as Fallback (using OpenAI compatibility layer)
-	if c.geminiApiKey != "" {
-		geminiUrl := "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-		geminiBody := map[string]interface{}{
-			"model": "gemini-1.5-flash",
-			"messages": []map[string]string{
-				{"role": "system", "content": systemPrompt},
-				{"role": "user", "content": userPrompt},
-			},
-		}
-
-		if useJSON {
-			geminiBody["response_format"] = map[string]interface{}{
-				"type": "json_object",
-			}
-		}
-
-		log.Println("Attempting AI request with Gemini...")
-		contentFallback, errFallback := c.executeRequest(geminiUrl, c.geminiApiKey, geminiBody)
-		if errFallback == nil {
-			log.Println("Gemini fallback request successful.")
-			return contentFallback, nil
-		}
-		return "", fmt.Errorf("all enabled AI APIs failed. Primary Error (Groq): %v, Fallback Error (Gemini): %v", primaryErr, errFallback)
-	}
-
-	return "", fmt.Errorf("all AI attempts failed or skipped. Primary Error (Groq): %v, Gemini: missing API key", primaryErr)
-}
-
+// ExtractIntent tries Grok first, then Gemini, then falls back to simple keyword extraction
 func (c *aiClientImpl) ExtractIntent(query string) (*model.AIIntent, error) {
-	systemPrompt := `You are an AI assistant that extracts structure from natural language map queries.
-Return a strict JSON object with:
-- "location": (string) The specific city/area mentioned. If none, leave empty string.
-- "category": (string) The main type of place (e.g., "restaurant", "cafe", "park").
-- "filters": (array of strings) Any specific conditions like "cheap", "wifi", "quiet".`
-
-	content, err := c.makeRequestWithFailover(systemPrompt, query, true)
-	if err != nil {
-		return nil, err
+	// Step 1: Try Grok (primary)
+	if c.grok.IsAvailable() {
+		intent, err := c.grok.ExtractIntent(query)
+		if err == nil {
+			return intent, nil
+		}
+		log.Printf("[AI Orchestrator] Grok intent extraction failed: %v. Falling back to Gemini...", err)
+	} else {
+		log.Println("[AI Orchestrator] Grok not available, trying Gemini...")
 	}
 
-	var intent model.AIIntent
-	if err := json.Unmarshal([]byte(content), &intent); err != nil {
-		return nil, fmt.Errorf("failed to parse AI response as JSON: %w. raw content: %s", err, content)
+	// Step 2: Try Gemini (fallback)
+	if c.gemini.IsAvailable() {
+		intent, err := c.gemini.ExtractIntent(query)
+		if err == nil {
+			return intent, nil
+		}
+		log.Printf("[AI Orchestrator] Gemini intent extraction failed: %v. Falling back to keyword extraction...", err)
+	} else {
+		log.Println("[AI Orchestrator] Gemini not available, falling back to keyword extraction...")
 	}
 
-	return &intent, nil
+	// Step 3: Final fallback — simple keyword extraction
+	log.Println("[AI Orchestrator] Using simple keyword extraction as final fallback")
+	return simpleKeywordExtract(query), nil
 }
 
+// GenerateSummary tries Gemini first (better at natural language), then Grok, then static fallback
 func (c *aiClientImpl) GenerateSummary(places []model.Place) (string, error) {
-	systemPrompt := `You are a helpful travel assistant. Given a list of top places found, write a 1-2 sentence compelling summary of what the user can expect.`
-
-	placesJSON, _ := json.Marshal(places)
-	userPrompt := "Here are the top places:\n" + string(placesJSON)
-
-	content, err := c.makeRequestWithFailover(systemPrompt, userPrompt, false)
-	if err != nil {
-		return "", err
+	// Step 1: Try Gemini (preferred for summaries)
+	if c.gemini.IsAvailable() {
+		summary, err := c.gemini.GenerateSummary(places)
+		if err == nil {
+			return summary, nil
+		}
+		log.Printf("[AI Orchestrator] Gemini summary generation failed: %v. Falling back to Grok...", err)
+	} else {
+		log.Println("[AI Orchestrator] Gemini not available for summary, trying Grok...")
 	}
 
-	return content, nil
+	// Step 2: Try Grok (fallback)
+	if c.grok.IsAvailable() {
+		summary, err := c.grok.GenerateSummary(places)
+		if err == nil {
+			return summary, nil
+		}
+		log.Printf("[AI Orchestrator] Grok summary generation failed: %v. Using static fallback...", err)
+	}
+
+	// Step 3: Static fallback
+	return generateStaticSummary(places), nil
+}
+
+// simpleKeywordExtract performs basic keyword extraction when no AI is available
+func simpleKeywordExtract(query string) *model.AIIntent {
+	q := strings.ToLower(strings.TrimSpace(query))
+
+	intent := &model.AIIntent{
+		Query:    "",
+		Location: "",
+		Filters:  []string{},
+	}
+
+	// Known location keywords (Indonesian cities)
+	locations := []string{
+		"jakarta", "bekasi", "bandung", "surabaya", "yogyakarta", "semarang",
+		"medan", "makassar", "palembang", "tangerang", "depok", "bogor",
+		"malang", "solo", "denpasar", "bali",
+	}
+
+	for _, loc := range locations {
+		if strings.Contains(q, loc) {
+			intent.Location = strings.Title(loc)
+			break
+		}
+	}
+
+	// Known category keywords
+	categories := map[string]string{
+		"makan":      "restaurant",
+		"restoran":   "restaurant",
+		"restaurant": "restaurant",
+		"cafe":       "cafe",
+		"kafe":       "cafe",
+		"kopi":       "coffee",
+		"coffee":     "coffee",
+		"taman":      "park",
+		"park":       "park",
+		"hotel":      "hotel",
+		"mall":       "mall",
+		"gym":        "gym",
+		"bar":        "bar",
+		"club":       "nightclub",
+	}
+
+	for keyword, category := range categories {
+		if strings.Contains(q, keyword) {
+			intent.Query = category
+			break
+		}
+	}
+
+	// If no category found, use the whole query
+	if intent.Query == "" {
+		intent.Query = q
+	}
+
+	// Known filter keywords
+	filterMap := map[string]string{
+		"murah":    "cheap",
+		"cheap":    "cheap",
+		"mahal":    "expensive",
+		"wifi":     "wifi",
+		"parkir":   "parking",
+		"halal":    "halal",
+		"24 jam":   "24 hours",
+		"24jam":    "24 hours",
+		"outdoor":  "outdoor",
+		"indoor":   "indoor",
+		"romantis": "romantic",
+	}
+
+	for keyword, filter := range filterMap {
+		if strings.Contains(q, keyword) {
+			intent.Filters = append(intent.Filters, filter)
+		}
+	}
+
+	log.Printf("[Keyword Extractor] Extracted: query=%s, location=%s, filters=%v", intent.Query, intent.Location, intent.Filters)
+	return intent
+}
+
+// generateStaticSummary creates a basic summary when AI summary generation is unavailable
+func generateStaticSummary(places []model.Place) string {
+	if len(places) == 0 {
+		return "No places found matching your search."
+	}
+	if len(places) == 1 {
+		return "We found 1 place that matches your search."
+	}
+	return "Here are some great places based on your search!"
 }

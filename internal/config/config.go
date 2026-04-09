@@ -8,14 +8,12 @@ import (
 )
 
 type Config struct {
-	Port                   string
-	Env                    string
-	GroqAPIKey             string
-	GeminiAPIKey           string
-	GoogleMapsAPIKey       string
-	SupabaseDBURL          string
-	SupabaseAnonKey        string
-	SupabaseServiceRoleKey string
+	Port             string
+	Env              string
+	GrokAPIKey       string
+	GeminiAPIKey     string
+	FoursquareAPIKey string
+	SupabaseDBURL    string
 }
 
 func LoadConfig() *Config {
@@ -26,14 +24,12 @@ func LoadConfig() *Config {
 	}
 
 	return &Config{
-		Port:                   getEnv("PORT", "8080"),
-		Env:                    getEnv("ENV", "development"),
-		GroqAPIKey:             getEnv("GROQ_API_KEY", ""),
-		GeminiAPIKey:           getEnv("GEMINI_API_KEY", ""),
-		GoogleMapsAPIKey:       getEnv("GOOGLE_MAPS_API_KEY", ""),
-		SupabaseDBURL:          getEnv("SUPABASE_DB_URL", ""),
-		SupabaseAnonKey:        getEnv("SUPABASE_ANON_KEY", ""),
-		SupabaseServiceRoleKey: getEnv("SUPABASE_SERVICE_ROLE_KEY", ""),
+		Port:             getEnv("PORT", "8080"),
+		Env:              getEnv("ENV", "development"),
+		GrokAPIKey:       getEnv("GROK_API_KEY", ""),
+		GeminiAPIKey:     getEnv("GEMINI_API_KEY", ""),
+		FoursquareAPIKey: getEnv("FOURSQUARE_API_KEY", ""),
+		SupabaseDBURL:    getEnv("SUPABASE_DB_URL", ""),
 	}
 }
 
